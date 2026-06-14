@@ -1,0 +1,382 @@
+# =============================================================================
+# AI-DQ3 configuration
+# -----------------------------------------------------------------------------
+# Single source of truth for thresholds, weights, semantic markers and
+# baseline settings. No dataset-specific clinical rule, range, allowed-value
+# set, target field, required field, or quasi-identifier is defined here or in
+# pipeline.py. All dataset-specific knowledge is supplied through metadata JSON.
+#
+# Scope (fixed by study design):
+#   * Tabular healthcare datasets.
+#   * Three assessment dimensions: Completeness (C), Accuracy (A),
+#     Reuse readiness (R).
+#   * Reuse readiness has four facets: documentation, standardisation,
+#     privacy-awareness (incl. re-identification risk), machine-readability.
+#   * Human-in-the-loop (HITL) is a cross-cutting triage layer, NOT a scored
+#     dimension.
+# =============================================================================
+
+project:
+  name: AI-DQ3 semantic variable-aware assessment pipeline
+  output_dir: results
+  figure_dir: figures
+  random_seed: 42
+  max_datasets: null
+
+input:
+  data_dir: data
+  metadata_dir: metadata
+  accepted_data_extensions: [".csv", ".xlsx", ".xls"]
+  accepted_metadata_extensions: [".json", ".txt", ".md", ".pdf", ".docx"]
+
+# -----------------------------------------------------------------------------
+# Missingness markers (Completeness dimension)
+# -----------------------------------------------------------------------------
+missingness:
+  technical_missing_markers: ["", " ", "na", "n/a", "nan", "null", "none", "missing", "unknown", "unk", "-", "--", "."]
+  semantic_missing_markers: ["not tested", "not performed", "not measured", "pending", "indeterminate", "not available", "not applicable", "not recorded"]
+  sentinel_detection:
+    enabled: true
+    min_numeric_fraction: 0.20
+    max_token_fraction: 0.85
+    max_distinct_tokens: 5
+    min_token_count: 2
+    max_token_length: 20
+
+# -----------------------------------------------------------------------------
+# Semantic role inference (RQ1 core: how variable meaning is operationalised)
+# Generic role-patterns only. Dataset-specific role overrides come from metadata.
+# -----------------------------------------------------------------------------
+semantic_role_inference:
+  id_patterns: ["(^|_)id$", "identifier", "subject", "record", "case", "visit", "mrn"]
+  target_patterns: ["target", "outcome", "label", "diagnosis", "class", "status", "cancer", "disease", "death", "mortality", "result", "positive", "readmission", "event"]
+  date_patterns: ["date", "time", "timestamp", "admission", "discharge", "visit"]
+  text_patterns: ["note", "text", "comment", "description", "history", "summary"]
+  measurement_patterns: ["age", "height", "weight", "score", "rate", "level", "value", "index", "pressure", "temperature", "count", "bmi", "glucose"]
+  numeric_parse_threshold: 0.98
+  mixed_numeric_threshold: 0.50
+  low_cardinality_threshold: 30
+  high_uniqueness_threshold: 0.85
+  low_confidence_threshold: 0.65
+  # ── OBLIGĀTI IESLĒGTS (v4) ────────────────────────────────────────────────
+  # sentence-transformers bi-enkoderu semantiskā lomu atpazīšana.
+  # Pieprasa: pip install -r requirements-semantic.txt
+  # Fallback uz leksikālajām heiristikām ja bibliotēka nav pieejama.
+  embedding:
+    enabled: true                                         # <-- mainīts no false
+    model: "sentence-transformers/all-MiniLM-L6-v2"
+    min_similarity: 0.30
+    margin_over_heuristic: 0.0
+    use_sample_values: true
+    n_sample_values: 8
+    role_prototypes:
+      identifier: "a unique record identifier or key such as patient id, subject id, case number"
+      target_or_outcome: "the outcome, label, diagnosis or class to be predicted"
+      continuous_measurement: "a continuous physiological or clinical measurement like blood pressure, glucose, weight, temperature"
+      continuous_numeric: "a generic continuous numeric quantity"
+      ordinal_or_categorical: "an ordered or coded categorical value such as a severity grade or stage"
+      categorical_nominal: "an unordered category such as group, type, region or status"
+      binary: "a yes/no or true/false two-valued indicator"
+      date_time: "a date, time or timestamp such as admission or discharge date"
+      free_text: "free-text clinical notes, comments or description"
+
+# -----------------------------------------------------------------------------
+# Accuracy dimension: anomaly / implausible value detection
+# -----------------------------------------------------------------------------
+anomaly_detection:
+  min_rows: 30
+  min_numeric_columns: 2
+  iqr_multiplier: 3.0
+  modified_z_threshold: 4.5
+  isolation_forest:
+    enabled: true
+    contamination_min: 0.01
+    contamination_max: 0.04
+    contamination_expected_cases: 25
+  local_outlier_factor:
+    enabled: true
+    min_neighbors: 10
+    max_neighbors: 35
+    divisor_for_neighbors: 20
+  proposed_ensemble:
+    min_methods: 2
+    require_ml_method: true
+  generic_baseline:
+    use_all_numeric_columns: true
+    iqr_multiplier: 1.5
+    modified_z_threshold: 3.5
+  ml_imputation:
+    strategy: median
+    report_footprint: true
+
+# -----------------------------------------------------------------------------
+# Scoring: three dimensions only. HITL is not weighted here.
+# -----------------------------------------------------------------------------
+scoring:
+  thresholds:
+    C: 0.95
+    A: 0.95
+    R: 0.80
+    composite: 0.85
+  weights:
+    A:
+      structural: 0.20
+      domain: 0.25
+      anomaly: 0.25
+      inconsistency: 0.15
+      schema_confidence: 0.15
+    C:
+      technical_cell: 0.25
+      semantic_cell: 0.20
+      required_fields: 0.25
+      critical_fields: 0.20
+      complete_rows: 0.10
+    R:
+      documentation: 0.40
+      standardisation: 0.20
+      privacy: 0.25
+      machine_readability: 0.15
+    composite:
+      A: 0.40
+      C: 0.30
+      R: 0.30
+
+# -----------------------------------------------------------------------------
+# Zero-config auto-inference
+# -----------------------------------------------------------------------------
+auto_inference:
+  enabled: true
+  direct_identifier_patterns:
+    - "(^|_)name$"
+    - "first_?name|last_?name|full_?name|surname|patient_?name"
+    - "(^|_)ssn$|social_security"
+    - "(^|_)mrn$|medical_record"
+    - "e-?mail|(^|_)email"
+    - "phone|mobile|telephone"
+    - "passport|national_id|nhs_number|insurance_number"
+    - "address|street|postcode_full|full_postcode"
+  quasi_identifier_patterns:
+    - "age|birth|dob|yob"
+    - "sex|gender"
+    - "race|ethnic|nationality|country|region|state|county|city|zip|postal|postcode"
+    - "marital|education|occupation|employment|income"
+    - "admission|discharge|visit|encounter|date"
+    - "weight|height"
+  quasi_identifier_cardinality_min: 2
+  quasi_identifier_cardinality_max_ratio: 0.50
+  max_auto_quasi_identifiers: 8
+
+
+reuse_readiness:
+  hybrid_rule_weight: 0.45
+  hybrid_text_weight: 0.55
+  hybrid_checklist_weight: 0.55
+  hybrid_similarity_weight: 0.45
+  llm_metadata_extraction:
+    enabled: false
+    apply_to_checklist: false
+    provider: "none"
+    model: ""
+    max_documentation_chars: 12000
+  semantic_similarity:
+    method: tfidf
+    normalization_min: 0.05
+    normalization_max: 0.45
+    embedding_normalization_min: 0.15
+    embedding_normalization_max: 0.55
+    # ── OBLIGĀTI IESLĒGTS (v4) ──────────────────────────────────────────────
+    # Cross-encoder re-ranking dokumentācijas relevances novērtēšanai.
+    # Precīzāks par bi-enkoderu kosinusu; deterministisks.
+    # Pieprasa: pip install -r requirements-semantic.txt
+    # Fallback uz bi-enkoderu / TF-IDF ja modelis nav pieejams.
+    cross_encoder:
+      enabled: true                                       # <-- mainīts no false
+      model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+      score_midpoint: 0.0
+      score_scale: 4.0
+  checklist_rule_weight: 1.0
+  documentation_components:
+    metadata_or_data_dictionary:
+      prompts:
+        - "dataset metadata data dictionary variable list column description"
+        - "data dictionary describes the variables and dataset structure"
+      checklist_keywords:
+        - "data dictionary"
+        - "codebook"
+        - "code book"
+        - "variable list"
+        - "column description"
+        - "dataset description"
+        - "metadata"
+        - "variables in this dataset"
+        - "variable name"
+        - "field description"
+    variable_descriptions:
+      prompts:
+        - "each variable has a clear meaning and description"
+        - "variables are explained for secondary users"
+      checklist_keywords:
+        - "variable description"
+        - "column description"
+        - "each variable"
+        - "variable name"
+        - "describes the variable"
+        - "variable label"
+        - "field name"
+        - "column name"
+        - "variable definitions"
+        - "codebook"
+        - "code book"
+    units_or_value_labels:
+      prompts:
+        - "measurement units value labels coding scheme allowed categories"
+        - "units and allowed values are documented"
+      checklist_keywords:
+        - "unit"
+        - "value label"
+        - "coding scheme"
+        - "allowed values"
+        - "categories"
+        - "measurement unit"
+        - "kg"
+        - "kcal"
+        - "mg"
+        - "encoded as"
+        - "coded as"
+        - "response option"
+    licence_or_usage_conditions:
+      prompts:
+        - "license usage conditions access restrictions reuse permissions"
+        - "terms of use for dataset reuse are specified"
+      checklist_keywords:
+        - "license"
+        - "licence"
+        - "terms of use"
+        - "usage conditions"
+        - "access conditions"
+        - "reuse"
+        - "copyright"
+        - "permitted use"
+        - "data sharing"
+        - "open data"
+        - "creative commons"
+        - "cc by"
+        - "ethics"
+        - "informed consent"
+        - "data access"
+    provenance_or_etl:
+      prompts:
+        - "data provenance source extraction transformation cleaning ETL process"
+        - "data origin and processing steps are documented"
+      checklist_keywords:
+        - "data collection"
+        - "data processing"
+        - "provenance"
+        - "etl"
+        - "data source"
+        - "collected from"
+        - "sampling"
+        - "survey"
+        - "instrument"
+        - "methodology"
+        - "data cleaning"
+        - "quality control"
+        - "missing data"
+        - "exclusion criteria"
+        - "inclusion criteria"
+        - "protocol"
+  standardisation_components:
+    standards_or_vocabularies:
+      prompts:
+        - "standard terminology controlled vocabulary coding system ontology"
+        - "standards or vocabularies are specified"
+      checklist_keywords:
+        - "iso "
+        - "icd"
+        - "loinc"
+        - "snomed"
+        - "controlled vocabulary"
+        - "ontology"
+        - "coding standard"
+        - "standard terminology"
+        - "nutridata"
+        - "efsa"
+        - "fao"
+        - "standard method"
+        - "validated instrument"
+        - "validated questionnaire"
+    versioning_or_reproducibility:
+      prompts:
+        - "versioning reproducibility scripts software environment package versions random seed"
+        - "analysis can be reproduced with code and documented computational environment"
+      checklist_keywords:
+        - "version"
+        - "reproducib"
+        - "script"
+        - "software"
+        - "package"
+        - "random seed"
+        - "github"
+        - "repository"
+        - "environment"
+        - "r version"
+        - "python version"
+        - "spss"
+        - "stata"
+  privacy:
+    k_anonymity_min: 5
+    risk_fraction_cap: 0.50
+    components:
+      direct_identifier_handling: 0.40
+      k_anonymity: 0.40
+      privacy_documentation: 0.20
+  machine_readability:
+    components:
+      confident_typing: 0.40
+      clean_headers: 0.30
+      parseable_values: 0.30
+
+# -----------------------------------------------------------------------------
+# Controlled error injection
+# -----------------------------------------------------------------------------
+baseline_experiment:
+  enabled: true
+  controlled_error_injection:
+    enabled: true
+    rates: [0.05]
+    error_types: ["set_missing", "numeric_sentinel", "high_outlier"]
+
+# -----------------------------------------------------------------------------
+# HITL triage layer
+# -----------------------------------------------------------------------------
+hitl:
+  sample_size:
+    anomaly_rows: 30
+    incomplete_rows: 30
+    control_rows: 30
+  prioritisation:
+    severity_rank: {high: 3, medium: 2, low: 1}
+    critical_field_boost: 1
+  allowed_decisions: ["true_issue", "valid_extreme", "false_positive", "uncertain_requires_domain_review"]
+
+# -----------------------------------------------------------------------------
+# Sensitivity analysis
+# -----------------------------------------------------------------------------
+sensitivity_analysis:
+  scenarios:
+    expert_original:
+      A: 0.40
+      C: 0.30
+      R: 0.30
+    equal_dimensions:
+      A: 0.3334
+      C: 0.3333
+      R: 0.3333
+    conservative_health_data:
+      A: 0.45
+      C: 0.35
+      R: 0.20
+    reuse_focused_open_science:
+      A: 0.30
+      C: 0.25
+      R: 0.45

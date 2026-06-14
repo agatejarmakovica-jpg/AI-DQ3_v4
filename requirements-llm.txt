@@ -1,0 +1,6 @@
+# OPTIONAL: only for Advanced Layer 3 (LLM metadata extractor), human-confirmed.
+# Set reuse_readiness.llm_metadata_extraction.enabled: true and provider in config.yaml.
+# For provider: "anthropic"
+anthropic>=0.39
+# For provider: "local" (CPU/GPU Hugging Face text-generation)
+# transformers>=4.40

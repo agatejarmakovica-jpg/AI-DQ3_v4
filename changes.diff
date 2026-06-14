@@ -1,0 +1,150 @@
+--- a/ai_dq3_v2/pipeline.py	2026-06-06 05:10:02.000000000 +0000
++++ b/ai_dq3_v2/pipeline.py	2026-06-08 18:17:49.256514957 +0000
+@@ -116,18 +116,63 @@
+ 
+ def load_dataset(path: Path) -> Tuple[pd.DataFrame, str]:
+     """Return (dataframe, encoding_note). encoding_note records non-UTF-8 fallback
+-    so it can feed the machine-readability facet."""
++    so it can feed the machine-readability facet.
++
++    Delimited text (.csv/.tsv) is read robustly and dataset-agnostically:
++      * encoding is auto-detected (UTF-8, else Latin-1 fallback);
++      * the field delimiter is chosen from {",", ";", tab, "|"} as the one that
++        yields the widest, most row-consistent table (handles European ";"-CSV);
++      * a European decimal comma is detected from the raw text (digit-comma-digit
++        pattern when the delimiter is not a comma) so numeric columns parse as
++        numbers rather than strings.
++    No value is hard-coded to any particular file; the choice is made from the
++    data itself, so a comma-CSV, a ";"-CSV and a tab file all load correctly."""
++    import io as _io
++
+     suffix = path.suffix.lower()
+-    if suffix == ".csv":
++    if suffix in {".csv", ".tsv"}:
++        raw = path.read_bytes()
+         try:
+-            df = pd.read_csv(path)
+-            if df.shape[1] == 1:
+-                alt = pd.read_csv(path, sep=";")
+-                if alt.shape[1] > df.shape[1]:
+-                    return alt, "utf8_semicolon"
+-            return df, "utf8"
++            text = raw.decode("utf-8")
++            non_utf8 = False
+         except UnicodeDecodeError:
+-            return pd.read_csv(path, encoding="latin1"), "non_utf8_latin1_fallback"
++            text = raw.decode("latin1")
++            non_utf8 = True
++
++        # --- choose delimiter from the data, not from the extension ---
++        sample_lines = [ln for ln in text.splitlines() if ln.strip()][:50]
++        sample = "\n".join(sample_lines)
++        candidates = ["\t"] if suffix == ".tsv" else [",", ";", "\t", "|"]
++        best_sep, best_ncols, best_consistency = ",", 0, -1.0
++        for sep in candidates:
++            try:
++                probe = pd.read_csv(_io.StringIO(sample), sep=sep, engine="python")
++            except Exception:
++                continue
++            ncols = probe.shape[1]
++            if ncols <= 1:
++                continue
++            # prefer more columns; break ties by how uniform the row width is
++            widths = [len(ln.split(sep)) for ln in sample_lines]
++            consistency = (widths.count(ncols) / len(widths)) if widths else 0.0
++            if (ncols > best_ncols) or (ncols == best_ncols and consistency > best_consistency):
++                best_sep, best_ncols, best_consistency = sep, ncols, consistency
++
++        # --- detect European decimal comma (only meaningful when sep is not ",") ---
++        decimal = "."
++        if best_sep != "," and re.search(r"\d,\d", text):
++            decimal = ","
++
++        df = pd.read_csv(_io.StringIO(text), sep=best_sep, decimal=decimal, engine="python")
++
++        if non_utf8:
++            note = "non_utf8_latin1_fallback"
++        elif best_sep == ";":
++            note = "utf8_semicolon"
++        else:
++            note = "utf8"
++        return df, note
++
+     if suffix in {".xlsx", ".xls"}:
+         return pd.read_excel(path), "excel"
+     raise ValueError(f"Unsupported data file: {path}")
+@@ -184,6 +229,13 @@
+     try:
+         if suffix in {".txt", ".md"}:
+             return path.read_text(encoding="utf-8", errors="ignore")
++        if suffix in {".csv", ".tsv"}:
++            # A codebook / data dictionary supplied as a delimited file is read as
++            # plain text so its variable definitions feed the documentation facet.
++            try:
++                return path.read_text(encoding="utf-8")
++            except UnicodeDecodeError:
++                return path.read_text(encoding="latin1", errors="ignore")
+         if suffix == ".pdf":
+             try:
+                 from pypdf import PdfReader  # type: ignore
+@@ -218,6 +270,15 @@
+ _DOC_NAME_HINTS = ("readme", "codebook", "code_book", "code book", "dictionary",
+                    "data_dictionary", "datadictionary", "description", "documentation", "notes")
+ 
++# Files that ship WITH the AI-DQ3 tool itself (scaffolding / instructions / templates)
++# and must NEVER be treated as documentation or metadata for a user's dataset.
++# Without this guard, a single-dataset run (n_datasets == 1, "attach loose files")
++# would sweep in the tool's own guide/template and award a spurious documentation
++# score even when the dataset has no accompanying documentation at all.
++# Restricted to the tool's exact shipped filenames so a user's own readme/codebook
++# (e.g. an uploaded "ReadMe.pdf") is never excluded.
++_TOOL_SCAFFOLDING = {"metadata_guide.md", "metadata_template.json"}
++
+ 
+ def find_related_metadata(dataset_path: Path, metadata_dir: Path, config: Dict[str, Any],
+                           n_datasets: int = 1) -> Dict[str, Any]:
+@@ -231,7 +292,7 @@
+         return default_metadata()
+ 
+     accepted = set(config["input"].get("accepted_metadata_extensions", [".json", ".txt", ".md"]))
+-    accepted |= {".pdf", ".docx"}
++    accepted |= {".pdf", ".docx", ".csv", ".tsv"}
+     ds_tokens = _tokenize_stem(dataset_path.stem)
+     metadata: Dict[str, Any] = {}
+     documentation_chunks: List[str] = []
+@@ -239,6 +300,8 @@
+     for path in sorted(metadata_dir.iterdir()):
+         if not path.is_file() or path.suffix.lower() not in accepted:
+             continue
++        if path.name.lower() in _TOOL_SCAFFOLDING:
++            continue  # never treat the tool's own guide/template as dataset documentation
+         raw_stem = path.stem.lower()
+         meta_tokens = _tokenize_stem(raw_stem.replace("metadata", "").replace("code book", "")
+                                      .replace("codebook", "").replace("readme", "")
+--- a/ai_dq3_v2/colab_bootstrap.py	2026-06-05 10:59:58.000000000 +0000
++++ b/ai_dq3_v2/colab_bootstrap.py	2026-06-08 17:54:56.870313814 +0000
+@@ -27,6 +27,12 @@
+ DATA_EXT = {".csv", ".xlsx", ".xls", ".tsv"}
+ META_EXT = {".json", ".txt", ".md", ".pdf", ".docx"}
+ 
++# A tabular file whose name marks it as a codebook / data dictionary / readme is
++# documentation, not a dataset to assess: route it to metadata/ so it raises the
++# reuse-readiness documentation score (kept in sync with pipeline._DOC_NAME_HINTS).
++_DOC_NAME_HINTS = ("readme", "codebook", "code_book", "code book", "dictionary",
++                   "data_dictionary", "datadictionary", "description", "documentation", "notes")
++
+ 
+ def _install_deps() -> None:
+     print("Installing dependencies (can take ~30 s the first time)...")
+@@ -57,7 +63,10 @@
+             print(f"  (could not unzip {src.name}: {exc})")
+         return
+     try:
+-        if ext in DATA_EXT:
++        is_doc_named = any(h in src.stem.lower() for h in _DOC_NAME_HINTS)
++        if ext in DATA_EXT and is_doc_named:
++            shutil.copy(str(src), str(ROOT / "metadata" / src.name)); print(f"  -> metadata/{src.name} (documentation)")
++        elif ext in DATA_EXT:
+             shutil.copy(str(src), str(ROOT / "data" / src.name)); print(f"  -> data/{src.name}")
+         elif ext in META_EXT:
+             shutil.copy(str(src), str(ROOT / "metadata" / src.name)); print(f"  -> metadata/{src.name}")

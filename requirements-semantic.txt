@@ -1,0 +1,11 @@
+# Nepieciešams AI-DQ3 v4 semantiskajam slānim.
+# Instalēt pirms pipeline palaišanas:
+#   pip install -r requirements-semantic.txt
+#
+# Iekļauj:
+#   1. sentence-transformers — bi-enkoderu semantiskā lomu piešķiršana
+#      (semantic_role_inference.embedding.enabled: true)
+#   2. cross-encoder/ms-marco-MiniLM-L-6-v2 — dokumentācijas relevances
+#      re-ranking (reuse_readiness.semantic_similarity.cross_encoder.enabled: true)
+#      Ielādējas automātiski kopā ar sentence-transformers.
+sentence-transformers>=2.2

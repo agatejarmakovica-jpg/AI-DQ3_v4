@@ -1,0 +1,45 @@
+AI-DQ3 — quick start (Google Colab)
+===================================
+
+THE SIMPLE WAY (any tabular dataset, no setup):
+
+1) Upload ai_dq3_v2_colab_ready.zip to the Colab session (left file browser).
+
+2) In a cell, run exactly:
+
+       !unzip -o ai_dq3_v2_colab_ready.zip
+       %cd /content/ai_dq3_v2
+       %run colab_bootstrap.py
+
+   - If data/ is empty, an upload dialog appears: pick your CSV/XLSX file(s),
+     OR a single ZIP containing the dataset plus its codebook / data dictionary
+     / readme (.pdf .docx .txt .md) and optional metadata JSON. The ZIP is
+     unpacked and the files are sorted automatically. An uploaded codebook
+     raises the reuse-readiness documentation score.
+   - The pipeline runs automatically and prints a C/A/R line per dataset.
+   - Figures and an HTML report are built and previewed inline.
+
+3) Open the full review:  results/<your_dataset>/report.html
+   (left file browser -> right-click -> Download, or:)
+
+       from IPython.display import HTML
+       HTML(open("results/<your_dataset>/report.html").read())
+
+NOTES
+-----
+* No metadata file is needed. Identifiers, quasi-identifiers and target are
+  auto-detected. To improve scoring you may add an optional metadata JSON
+  (see metadata/METADATA_GUIDE.md).
+* To assess more datasets: drop more files into the data/ folder and re-run
+  the %run cell. Existing data is kept; one bad file will not stop the others.
+* If you see "NO DATA TO ASSESS", just put a .csv/.xlsx in data/ and re-run.
+
+ALTERNATIVE (manual, no upload dialog)
+--------------------------------------
+       !unzip -o ai_dq3_v2_colab_ready.zip
+       %cd /content/ai_dq3_v2
+       # copy your file into data/ however you like, then:
+       !pip install -q -r requirements.txt
+       !python pipeline.py --config config.yaml
+       !python figures.py --results results --out figures
+       !python report.py  --results results --figures figures --out results
