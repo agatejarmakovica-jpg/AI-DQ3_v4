@@ -1,4 +1,6 @@
 # AI-DQ3: semantic variable-aware data quality assessment pipeline
+## Funding
+This work was carried out within the RTU Doctoral Grant project. The project funding is provided by the **DITEF Information Technology Institute, Riga Technical University (RTU)**. 
 
 AI-DQ3 is a single-version, configuration-driven pipeline for **semantic
 variable-aware** quality assessment of **tabular healthcare datasets**. It uses
