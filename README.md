@@ -304,3 +304,66 @@ local Hugging Face model. Never repairs data; no external call unless enabled.
 → TF-IDF fallback); LLM extraction is non-deterministic and must be
 human-confirmed before it affects scoring; composite, dimensions and HITL status
 are unchanged.
+
+## Changes implemented for the AIS 2026 revision
+
+The following implementation, evaluation, and reproducibility changes were introduced in response to the review:
+
+1. **Corrected rule-only provenance.**  
+   The value reported in `semantic_role_rule_based` is now produced through a separate inference path in which embeddings are disabled. The schema profile distinguishes the rule-only, embedding-based, and final semantic roles, together with their confidence, evidence, source, and disagreement status.
+
+2. **Connected semantic-review signals to HITL prioritisation.**  
+   A semantic-role confidence below 0.65 or disagreement between the rule-only and embedding-based roles sets `requires_semantic_review`. This signal now creates an explicit HITL triage item, receives a configurable priority boost, and appears in the ordered HITL register with its supporting evidence.
+
+3. **Added a fixed-parameter routing ablation.**  
+   The ablation compares three routing policies:
+   - uniform technical typing;
+   - lexical/distributional rule-only routing;
+   - transformer-augmented routing.
+
+   All three conditions use identical detector parameters: an IQR multiplier of 3.0, a modified-z threshold of 4.5, the same Isolation Forest and LOF settings, and an ensemble rule requiring at least two agreeing methods, including one multivariate detector. The rule-only-to-transformer contrast therefore isolates the marginal effect of transformer-supported column routing.
+
+4. **Separated the operational policy comparison from the transformer ablation.**  
+   The original uniform and semantic+HITL configurations differ in column selection, statistical thresholds, and the ensemble decision rule. Their comparison is therefore reported as the effect of the complete semantic+HITL policy. Transformer-specific conclusions are based only on the fixed-parameter ablation.
+
+5. **Added controlled row-level error injection.**  
+   With random seed 42 and an injection rate of 5%, one corruption is inserted into each selected row. The injected error types cycle through:
+   - replacement with `NaN`;
+   - replacement with the numeric sentinel `-999`;
+   - replacement with ten times the column's 99th percentile, using `9999` when the percentile is undefined.
+
+   The experiment injects six rows in the immunodeficiency dataset and 271 rows in the survey dataset. The microbiology dataset has no eligible numeric matrix for this protocol.
+
+6. **Added row-level precision, recall, and F1 evaluation.**  
+   Each routing configuration is run on the original dataset and its corrupted copy. A positive prediction is a row that newly receives an ensemble anomaly flag after injection. Rows already flagged in the original dataset are excluded from the prediction set.
+
+7. **Clarified the reported outcome measures.**  
+   Results from unlabelled real datasets are reported as anomaly-review workload: the number and percentage of rows routed to expert review. Precision, recall, and F1 are reported only for the controlled-error experiment, where row-level ground truth is available.
+
+8. **Documented the domain-specific microbiology boundary.**  
+   The microbiology dataset contains a composite header, `NT` test-status tokens, censored MIC values, and S/I/R categories. Transformer augmentation selected three domain-coded columns and produced one review candidate. Reliable processing of this dataset requires explicit domain vocabularies, multi-row-header reconstruction, MIC parsing, and expert validation.
+
+9. **Improved preprocessing transparency.**  
+   Median imputation is applied only to the temporary matrix required by Isolation Forest and LOF. IQR and modified z-score operate on raw, non-imputed values. The source dataset is not modified, and the imputation footprint is recorded in `anomaly_preprocessing_report.csv`.
+
+10. **Added reproducibility artifacts.**  
+    The repository now includes the fixed-parameter ablation configuration, controlled-error results, aggregated outputs, input SHA-256 manifest, model and package revisions, random seed, and run instructions. The AIS 2026 workflow is available in `experiments/AIS2026_4034/`.
+
+11. **Added generic robustness corrections.**  
+    The pipeline now includes data-driven detection of sentinel or placeholder values, improved separation of continuous measurements from key-like identifiers, and canonicalisation-based detection of categorical encoding inconsistencies. These corrections do not rely on dataset-specific column names or hard-coded category lists.
+
+12. **Preserved backward-compatible behaviour.**  
+    The composite index remains `0.40*A + 0.30*C + 0.30*R`; HITL remains a review layer rather than a scored dimension; the pipeline does not automatically repair source data; and rule-only execution remains available when embeddings are disabled or unavailable.
+
+The fixed-parameter results do not establish a universal transformer advantage. Transformer augmentation produced the same review workload as rule-only routing for the immunodeficiency and survey datasets, reduced controlled-error recall in the survey dataset, and selected domain-coded variables in the microbiology dataset.
+
+## Funding
+
+This work was developed within the EU ERDF-funded project **“RTU Doctoral Grants for Supporting Scientific Excellence in Smart Specialization Areas”** (No. **1.1.1.8/1/24/I/007**), within doctoral grant **ID 8036**.
+
+## Repository and reproducibility
+
+- Repository: https://github.com/agatejarmakovica-jpg/AI-DQ3_v4
+- Reported revision: https://github.com/agatejarmakovica-jpg/AI-DQ3_v4/commit/888cd17ecc2270a0244b4051f352776185d57a99
+- AIS 2026 reproducibility workflow: `experiments/AIS2026_4034/`
+
