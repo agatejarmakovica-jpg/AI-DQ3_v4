@@ -1,25 +1,24 @@
 AI-DQ3 — quick start (Google Colab)
 ===================================
 
-THE SIMPLE WAY (any tabular dataset, no setup):
+THE SIMPLE WAY (any tabular dataset):
 
-1) Upload ai_dq3_v2_colab_ready.zip to the Colab session (left file browser).
+1) In a Colab cell, clone the public repository and install dependencies:
 
-2) In a cell, run exactly:
+       !git clone https://github.com/agatejarmakovica-jpg/AI-DQ3_v4.git
+       %cd /content/AI-DQ3_v4
+       !pip install -q -r requirements.txt -r requirements-semantic.txt
 
-       !unzip -o ai_dq3_v2_colab_ready.zip
-       %cd /content/ai_dq3_v2
-       %run colab_bootstrap.py
+2) Upload CSV/XLSX files to /content/AI-DQ3_v4/data and optional documentation
+   or <dataset_stem>_metadata.json files to /content/AI-DQ3_v4/metadata.
 
-   - If data/ is empty, an upload dialog appears: pick your CSV/XLSX file(s),
-     OR a single ZIP containing the dataset plus its codebook / data dictionary
-     / readme (.pdf .docx .txt .md) and optional metadata JSON. The ZIP is
-     unpacked and the files are sorted automatically. An uploaded codebook
-     raises the reuse-readiness documentation score.
-   - The pipeline runs automatically and prints a C/A/R line per dataset.
-   - Figures and an HTML report are built and previewed inline.
+3) Run:
 
-3) Open the full review:  results/<your_dataset>/report.html
+       !python pipeline.py --config config.yaml
+       !python figures.py --results results --out figures
+       !python report.py --results results --figures figures --out results
+
+4) Open the full review: results/<your_dataset>/report.html
    (left file browser -> right-click -> Download, or:)
 
        from IPython.display import HTML
@@ -34,12 +33,10 @@ NOTES
   the %run cell. Existing data is kept; one bad file will not stop the others.
 * If you see "NO DATA TO ASSESS", just put a .csv/.xlsx in data/ and re-run.
 
-ALTERNATIVE (manual, no upload dialog)
---------------------------------------
-       !unzip -o ai_dq3_v2_colab_ready.zip
-       %cd /content/ai_dq3_v2
-       # copy your file into data/ however you like, then:
-       !pip install -q -r requirements.txt
-       !python pipeline.py --config config.yaml
-       !python figures.py --results results --out figures
-       !python report.py  --results results --figures figures --out results
+AIS 2026 SUBMISSION 4034 RERUN
+-------------------------------
+See experiments/AIS2026_4034/README.md. Download the three DOI datasets, retain
+the exact filenames, arrange d1/d2/d3 input folders, and run:
+
+       !pip install -q -r requirements-experiment.txt
+       !python experiments/AIS2026_4034/run_experiment.py --input-root /content/INPUT_ROOT

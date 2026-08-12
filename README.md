@@ -1,8 +1,12 @@
 # AI-DQ3: semantic variable-aware data quality assessment pipeline
 ## Funding
-This work was carried out within the RTU Doctoral Grant project. The project funding is provided by the **DITEF Information Technology Institute, Riga Technical University (RTU)**. 
+The work was developed within the framework of the EU ERDF-funded project
+**“RTU Doctoral Grants for Supporting Scientific Excellence in Smart
+Specialization Areas”** (No. 1.1.1.8/1/24/I/007) within the framework of a
+doctoral grant (ID 8036).
 
-AI-DQ3 is a single-version, configuration-driven pipeline for **semantic
+**Artificial Intelligence-Assisted Data Quality in Three Dimensions (AI-DQ3)**
+is a single-version, configuration-driven pipeline for **semantic
 variable-aware** quality assessment of **tabular healthcare datasets**. It uses
 inferred variable meaning to guide three assessment dimensions —
 **Completeness (C)**, **Accuracy (A)**, and **Reuse readiness (R)** — and adds a
@@ -44,33 +48,27 @@ Supporting artifacts: `completeness_components.csv`, `accuracy_components.csv`,
 `hitl_triage_register.csv`, `hitl_triage_summary.csv`,
 `hitl_validation_sample.csv`, `anomaly_preprocessing_report.csv` (imputation
 footprint transparency), `controlled_error_baseline.csv` (precision/recall/F1
-validation), `weight_sensitivity.csv`.
+validation), `routing_ablation.csv`, `routing_ablation_controlled_errors.csv`,
+`routing_ablation_contrasts.csv`, and `weight_sensitivity.csv`.
 
-## Optional: embedding-based semantic inference
+## Embedding-based semantic inference
 
-By default, semantic roles are inferred from variable names, value distributions
-and (optional) metadata — lexical + distributional inference, with a confidence
-reported per variable. This needs no extra dependency and is fully deterministic.
+The v4 configuration enables the pinned sentence-transformer layer. Semantic
+roles combine variable names, detected type, sampled values, optional metadata,
+and lexical/distributional rules. The schema profile records rule-only,
+embedding, and final roles separately, including their evidence, confidence,
+source, disagreement, and review requirement.
 
-For stronger, meaning-based matching (synonyms, unseen names, partial other
-languages), an **optional** embedding layer can replace the name-pattern step:
-sentence-transformers encodes each variable's name (+ description + sample
-values) and matches it against natural-language role prototypes by cosine
-similarity. To enable it:
+Install the semantic dependencies before running v4:
 
 ```bash
 pip install -r requirements-semantic.txt
-# then set in config.yaml:
-#   semantic_role_inference:
-#     embedding:
-#       enabled: true
 ```
 
-It is **off by default** to keep the pipeline dependency-free and reproducible.
-If enabled but the library or model is unavailable (e.g. offline), the pipeline
+If the library or model is unavailable (for example, offline), the pipeline
 automatically falls back to the heuristics — it never crashes. The method used
-(`embedding:<model>` or `lexical_distributional_heuristic`) and the model name
-are recorded in `rq3_quality_profile.csv` for reproducibility. Heavier options
+(`embedding:<model>@<revision>` or `lexical_distributional_heuristic`), model
+name, and immutable model revision are recorded for reproducibility. Heavier options
 (scispaCy/UMLS clinical-concept mapping, zero-shot LLM classification) are
 deliberately not bundled: they add licensing/size/non-determinism that would
 undermine the reproducibility the study relies on.
@@ -127,6 +125,7 @@ returned by the pipeline is never modified.
 
 ```bash
 pip install -r requirements.txt
+pip install -r requirements-semantic.txt
 # place CSV/XLSX in data/ and optional metadata JSON in metadata/
 python pipeline.py --config config.yaml
 python figures.py --results results --out figures   # manuscript-ready figures (no titles)
@@ -179,11 +178,11 @@ line-art figures.
 
 See `RUN_COLAB.txt`.
 
-## Limitations (for the manuscript)
+## Limitations
 
-- Semantic role inference is lexical + distributional, not deep semantic
-  understanding; confidence is reported per variable and low-confidence roles
-  are routed to HITL.
+- The general-domain sentence transformer is not clinical semantic
+  understanding. Low-confidence roles and rule/embedding disagreements are
+  explicit HITL candidates.
 - TF-IDF cosine similarity measures lexical overlap with reference prompts, not
   meaning; multilingual or synonym-rich documentation may score lower.
 - k-anonymity is a measurement over declared quasi-identifiers; if none are
@@ -233,8 +232,10 @@ the existing structure, formulas and outputs:
 1. **Semantic role inference.** Each column is matched against predefined role
    prototypes with embeddings (`sentence-transformers/all-MiniLM-L6-v2`); the
    schema profile reports `semantic_role_rule_based`, `semantic_role_embedding`,
-   `semantic_role_final`, `semantic_role_confidence`, `semantic_role_source`,
-   and `requires_semantic_review`. Falls back to rule-based logic if the library
+   `semantic_role_final`, channel-specific confidence/evidence,
+   `semantic_role_source`, `semantic_role_disagreement`, and
+   `requires_semantic_review`. The rule-only result is computed through a path
+   that never invokes embeddings. Falls back to rule-based logic if the library
    is not installed.
 2. **Reuse-readiness documentation interpretation.** Embedding (or TF-IDF
    fallback) similarity between documentation text and reuse prompts, combined as
@@ -244,18 +245,19 @@ the existing structure, formulas and outputs:
    `hitl_explanation` (issue type, column, semantic role, triggered check, reason
    for review). No external LLM is used by default; data is never auto-repaired.
 
-**Files changed:** `pipeline.py` (functions added: `role_provenance`,
-`_embedding_doc_similarity`, `_hitl_explanation`; updated: `build_profiles`,
-`text_similarity_scores`, `hybrid_facet`, `build_triage_register`), `config.yaml`,
-`README.md`.
+The AIS 2026 reproducibility workflow and fixed-parameter routing ablation are in
+`experiments/AIS2026_4034/`. The ablation holds all detector thresholds and the
+ensemble rule constant while comparing technical typing, rule-only semantic
+routing, and transformer-augmented routing.
 
 **Config options added:** `reuse_readiness.semantic_similarity.embedding_normalization_min/max`,
 `reuse_readiness.hybrid_checklist_weight` (0.55), `reuse_readiness.hybrid_similarity_weight` (0.45);
 existing `semantic_role_inference.embedding.*` controls the role model.
 
-**How to run:** rule-based by default (`%run colab_bootstrap.py`). To enable the
-embedding mode: `pip install -r requirements-semantic.txt` and set
-`semantic_role_inference.embedding.enabled: true` in `config.yaml`.
+**How to run:** install `requirements-semantic.txt` and execute
+`python pipeline.py --config config.yaml`. Set
+`semantic_role_inference.embedding.enabled: false` only when a rule-only run is
+intended.
 
 **Unchanged:** composite remains `0.40*A + 0.30*C + 0.30*R`; HITL is not a score
 dimension; no dataset-specific columns are hard-coded; rule-based mode still works;

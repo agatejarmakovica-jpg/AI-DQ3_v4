@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -481,7 +482,8 @@ def infer_uniform_type(series: pd.Series, config: Dict[str, Any]) -> Tuple[str, 
 
 # Optional embedding model for semantic role inference. Loaded lazily and cached;
 # stays None (and the pipeline falls back to heuristics) if unavailable.
-_EMBED_STATE: Dict[str, Any] = {"tried": False, "model": None, "name": None, "proto_vecs": None, "proto_roles": None}
+_EMBED_STATE: Dict[str, Any] = {"tried": False, "model": None, "name": None, "revision": None,
+                                "proto_vecs": None, "proto_roles": None}
 
 
 def _get_embedder(config: Dict[str, Any]):
@@ -497,13 +499,16 @@ def _get_embedder(config: Dict[str, Any]):
     try:
         from sentence_transformers import SentenceTransformer  # type: ignore
         model_name = emb_cfg.get("model", "sentence-transformers/all-MiniLM-L6-v2")
-        model = SentenceTransformer(model_name)
+        model_revision = emb_cfg.get("revision") or None
+        cache_folder = os.environ.get("AI_DQ3_MODEL_CACHE") or None
+        model = SentenceTransformer(model_name, revision=model_revision, cache_folder=cache_folder)
         prototypes = emb_cfg.get("role_prototypes", {}) or {}
         roles = list(prototypes.keys())
         proto_vecs = model.encode([prototypes[r] for r in roles], normalize_embeddings=True)
-        _EMBED_STATE.update({"model": model, "name": model_name,
+        _EMBED_STATE.update({"model": model, "name": model_name, "revision": model_revision,
                              "proto_vecs": proto_vecs, "proto_roles": roles})
-        print(f"AI-DQ3: embedding semantic inference enabled (model: {model_name}).")
+        revision_note = f"@{model_revision[:8]}" if model_revision else ""
+        print(f"AI-DQ3: embedding semantic inference enabled (model: {model_name}{revision_note}).")
         return model
     except Exception as exc:
         print(f"AI-DQ3: embedding semantic inference unavailable ({type(exc).__name__}); "
@@ -522,7 +527,7 @@ def embedding_role(col: str, series: pd.Series, metadata: Dict[str, Any], config
     emb_cfg = config["semantic_role_inference"]["embedding"]
     try:
         import numpy as _np
-        parts = [str(col).replace("_", " ")]
+        parts = [str(col).replace("_", " "), f"type {series.dtype}"]
         desc = (metadata.get("variable_descriptions", {}) or {}).get(col)
         if desc:
             parts.append(str(desc))
@@ -553,40 +558,18 @@ def role_provenance(col: str, series: pd.Series, dtype: str, metadata: Dict[str,
     values and (if available) the metadata description, matched against the
     predefined role prototypes by cosine similarity. Falls back to rule-based when
     sentence-transformers is unavailable."""
-    rule_role, rule_conf, _ = infer_semantic_role(col, series, metadata, config)
-    emb_cfg = config["semantic_role_inference"].get("embedding", {})
+    rule_role, rule_conf, rule_note = infer_rule_based_role(col, series, metadata, config)
     review_thr = config["semantic_role_inference"].get("low_confidence_threshold", 0.65)
-
-    emb_role = None
-    emb_conf = None
-    model = _get_embedder(config)
-    if model is not None:
-        try:
-            import numpy as _np
-            parts = [str(col).replace("_", " "), f"type {dtype}"]
-            desc = (metadata.get("variable_descriptions", {}) or {}).get(col)
-            if desc:
-                parts.append(str(desc))
-            if emb_cfg.get("use_sample_values", True):
-                n = int(emb_cfg.get("n_sample_values", 8))
-                sample = series.dropna().astype(str).head(n).tolist()
-                if sample:
-                    parts.append("example values: " + ", ".join(sample))
-            vec = model.encode([". ".join(parts)], normalize_embeddings=True)[0]
-            sims = _np.asarray(_EMBED_STATE["proto_vecs"]) @ _np.asarray(vec)
-            best = int(sims.argmax())
-            best_sim = float(sims[best])
-            if best_sim >= float(emb_cfg.get("min_similarity", 0.30)):
-                emb_role = _EMBED_STATE["proto_roles"][best]
-                emb_conf = clip01(0.55 + 0.45 * best_sim)
-        except Exception:
-            emb_role, emb_conf = None, None
+    emb = embedding_role(col, series, metadata, config)
+    emb_role, emb_conf, emb_note = emb if emb is not None else (None, None, "embedding unavailable or below threshold")
 
     # Final role: keep the existing pipeline behaviour (rule-based unless the
     # embedding layer is enabled AND already integrated by infer_semantic_role).
     final_role, final_conf, _ = infer_semantic_role(col, series, metadata, config)
-    if emb_role is not None and emb_role == final_role:
+    if emb_role is not None and emb_role == rule_role and final_role == rule_role:
         source = "agreement"
+    elif emb_role is not None and final_role == emb_role and emb_role != rule_role:
+        source = "embedding"
     elif emb_role is not None and final_role == rule_role and emb_role != rule_role:
         source = "rule_based"   # rule kept; embedding differs -> flag for review
     elif emb_role is not None:
@@ -598,15 +581,21 @@ def role_provenance(col: str, series: pd.Series, dtype: str, metadata: Dict[str,
     requires_review = bool(final_conf < review_thr or disagree)
     return {
         "semantic_role_rule_based": rule_role,
+        "semantic_role_rule_confidence": round(float(rule_conf), 3),
+        "semantic_role_rule_evidence": rule_note,
         "semantic_role_embedding": emb_role if emb_role is not None else "",
+        "semantic_role_embedding_confidence": round(float(emb_conf), 3) if emb_conf is not None else np.nan,
+        "semantic_role_embedding_evidence": emb_note,
         "semantic_role_final": final_role,
         "semantic_role_confidence": round(float(final_conf), 3),
         "semantic_role_source": source,
+        "semantic_role_disagreement": disagree,
         "requires_semantic_review": requires_review,
     }
 
 
-def infer_semantic_role(col: str, series: pd.Series, metadata: Dict[str, Any], config: Dict[str, Any]) -> Tuple[str, float, str]:
+def infer_semantic_role(col: str, series: pd.Series, metadata: Dict[str, Any], config: Dict[str, Any],
+                        allow_embedding: bool = True) -> Tuple[str, float, str]:
     """Semantic profiler: variable meaning, driven by metadata overrides first,
     then (optionally) embedding similarity, then generic name/value heuristics.
     Confidence is reported so uncertainty is explicit."""
@@ -641,7 +630,7 @@ def infer_semantic_role(col: str, series: pd.Series, metadata: Dict[str, Any], c
         return "binary", 0.92, "binary observed value set"
 
     # Optional embedding-based meaning match (between structural and lexical layers).
-    emb = embedding_role(col, series, metadata, config)
+    emb = embedding_role(col, series, metadata, config) if allow_embedding else None
     if emb is not None:
         emb_role, emb_conf, emb_note = emb
         # Don't let embeddings override clear numeric structure into a text role.
@@ -688,6 +677,16 @@ def infer_semantic_role(col: str, series: pd.Series, metadata: Dict[str, Any], c
     if unique_count <= role_cfg.get("low_cardinality_threshold", 30):
         return "categorical_nominal", 0.78, "limited observed categories"
     return "free_text_or_high_cardinality", 0.55, "semantic role requires review"
+
+
+def infer_rule_based_role(col: str, series: pd.Series, metadata: Dict[str, Any],
+                          config: Dict[str, Any]) -> Tuple[str, float, str]:
+    """Infer a role without consulting sentence embeddings.
+
+    This separate path prevents an embedding-assisted result from being written
+    to ``semantic_role_rule_based`` in provenance and ablation artifacts.
+    """
+    return infer_semantic_role(col, series, metadata, config, allow_embedding=False)
 
 
 def build_profiles(df: pd.DataFrame, metadata: Dict[str, Any], config: Dict[str, Any]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -976,8 +975,16 @@ def structural_validity(df: pd.DataFrame, profile: pd.DataFrame, config: Dict[st
             non_numeric = int(parsed.isna().sum())
             if non_numeric > 0:
                 rows.append(issue("A", "structural", "non_numeric_observed_value", col, non_numeric, "high", "review"))
-        if float(r["role_confidence"]) < low_conf:
-            rows.append(issue("A", "schema", "low_semantic_role_confidence", col, 1, "medium", "schema_confirmation"))
+        if bool(r.get("requires_semantic_review", float(r["role_confidence"]) < low_conf)):
+            disagreement = bool(r.get("semantic_role_disagreement", False))
+            issue_type = "semantic_role_disagreement" if disagreement else "low_semantic_role_confidence"
+            rule = (
+                f"rule={r.get('semantic_role_rule_based', '')}; "
+                f"embedding={r.get('semantic_role_embedding', '')}; "
+                f"final={r.get('semantic_role_final', role)}; confidence={float(r['role_confidence']):.3f}"
+            )
+            rows.append(issue("A", "semantic_role_provenance", issue_type, col, 1,
+                              "medium" if disagreement else "low", "schema_confirmation", rule))
     duplicate_rows = int(df.duplicated().sum())
     if duplicate_rows > 0:
         rows.append(issue("A", "structural", "duplicate_rows", None, duplicate_rows, "high", "review"))
@@ -1143,6 +1150,8 @@ def anomaly_flags(df: pd.DataFrame, columns: List[str], config: Dict[str, Any], 
     mz_flag = pd.Series(False, index=df.index)
     for col in raw.columns:
         x = raw[col]
+        if not x.notna().any():
+            continue
         q1, q3 = x.quantile(0.25), x.quantile(0.75)
         iqr = q3 - q1
         if iqr > 0:
@@ -1160,7 +1169,7 @@ def anomaly_flags(df: pd.DataFrame, columns: List[str], config: Dict[str, Any], 
     report_rows = []
     for col in imputed.columns:
         n_missing = int(imputed[col].isna().sum())
-        med = imputed[col].median()
+        med = imputed[col].median() if imputed[col].notna().any() else np.nan
         imputed[col] = imputed[col].fillna(0 if pd.isna(med) else med)
         report_rows.append({"column": col, "imputed_cells": n_missing, "imputed_rate": safe_div(n_missing, len(df))})
     imputation_report = pd.DataFrame(report_rows)
@@ -1248,7 +1257,7 @@ def collect_documentation_text(metadata: Dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-_CE_STATE: Dict[str, Any] = {"tried": False, "model": None, "name": None}
+_CE_STATE: Dict[str, Any] = {"tried": False, "model": None, "name": None, "revision": None}
 
 
 def _get_cross_encoder(config: Dict[str, Any]):
@@ -1264,8 +1273,12 @@ def _get_cross_encoder(config: Dict[str, Any]):
     try:
         from sentence_transformers import CrossEncoder  # type: ignore
         name = ce_cfg.get("model", "cross-encoder/ms-marco-MiniLM-L-6-v2")
-        _CE_STATE.update({"model": CrossEncoder(name), "name": name})
-        print(f"AI-DQ3: cross-encoder reuse re-ranking enabled (model: {name}).")
+        revision = ce_cfg.get("revision") or None
+        cache_folder = os.environ.get("AI_DQ3_MODEL_CACHE") or None
+        _CE_STATE.update({"model": CrossEncoder(name, revision=revision, cache_dir=cache_folder),
+                          "name": name, "revision": revision})
+        revision_note = f"@{revision[:8]}" if revision else ""
+        print(f"AI-DQ3: cross-encoder reuse re-ranking enabled (model: {name}{revision_note}).")
         return _CE_STATE["model"]
     except Exception as exc:
         print(f"AI-DQ3: cross-encoder unavailable ({type(exc).__name__}); using bi-encoder/TF-IDF.")
@@ -1663,6 +1676,7 @@ def _hitl_explanation(row: pd.Series, role_lookup: Dict[str, str]) -> str:
         "direct_identifier_present": "a direct personal identifier is present in the data",
         "ensemble_anomaly_candidate": "multiple detectors agree the record is anomalous",
         "low_semantic_role_confidence": "the variable's semantic role is uncertain",
+        "semantic_role_disagreement": "rule-based and embedding evidence assign different semantic roles",
     }
     reason = reasons.get(str(row.get("issue_type", "")), "the value needs expert judgement to confirm")
     return (f"{dim.capitalize()} issue '{issue_type}' on column '{col}' "
@@ -1681,6 +1695,7 @@ def build_triage_register(issues: pd.DataFrame, metadata: Dict[str, Any], config
                                      "severity", "priority_score", "suggested_decision_options", "hitl_explanation"])
     sev_rank = config["hitl"]["prioritisation"].get("severity_rank", {"high": 3, "medium": 2, "low": 1})
     boost = config["hitl"]["prioritisation"].get("critical_field_boost", 1)
+    semantic_review_boost = config["hitl"]["prioritisation"].get("semantic_review_boost", 1)
     critical = {normalize_name(c) for c in metadata.get("critical_fields", [])}
     options = " | ".join(config["hitl"].get("allowed_decisions", []))
 
@@ -1688,6 +1703,8 @@ def build_triage_register(issues: pd.DataFrame, metadata: Dict[str, Any], config
     reg["priority_score"] = reg.apply(
         lambda r: sev_rank.get(str(r.get("severity", "")).lower(), 1)
         + (boost if normalize_name(r.get("column")) in critical else 0)
+        + (semantic_review_boost if str(r.get("issue_type", "")) in
+           {"semantic_role_disagreement", "low_semantic_role_confidence"} else 0)
         + np.log1p(float(r.get("count", 0))), axis=1)
     reg = reg.sort_values("priority_score", ascending=False).reset_index(drop=True)
     reg["priority_rank"] = reg.index + 1
@@ -1841,6 +1858,92 @@ def controlled_error_baseline(df: pd.DataFrame, metadata: Dict[str, Any], config
     return pd.DataFrame(rows)
 
 
+def routing_ablation(df: pd.DataFrame, semantic_profile: pd.DataFrame,
+                     uniform_profile: pd.DataFrame, metadata: Dict[str, Any],
+                     config: Dict[str, Any]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Isolate routing effects while holding every detector parameter fixed.
+
+    All policies use the semantic+HITL detector settings. Only the selected
+    column set changes. The rule-to-transformer contrast is therefore the
+    isolated marginal routing effect of accepted embedding evidence.
+    """
+    rule_profile = semantic_profile.copy()
+    rule_profile["role"] = rule_profile["semantic_role_rule_based"]
+    policies = [
+        ("uniform_dtype_routing", "technical data type",
+         numeric_columns_from_profile(df, uniform_profile, semantic=False)),
+        ("rule_based_semantic_routing", "lexical and distributional rules",
+         numeric_columns_from_profile(df, rule_profile, semantic=True)),
+        ("transformer_augmented_routing", "rules plus sentence-transformer",
+         numeric_columns_from_profile(df, semantic_profile, semantic=True)),
+    ]
+    anomaly_cfg = config["anomaly_detection"]
+    ens_cfg = anomaly_cfg.get("proposed_ensemble", {})
+    fixed = {
+        "iqr_multiplier": anomaly_cfg.get("iqr_multiplier", 3.0),
+        "modified_z_threshold": anomaly_cfg.get("modified_z_threshold", 4.5),
+        "ensemble_min_methods": ens_cfg.get("min_methods", 2),
+        "ensemble_require_ml_method": ens_cfg.get("require_ml_method", True),
+        "parameter_lock": "semantic_hitl_fixed_v1",
+    }
+
+    burden_rows: List[Dict[str, Any]] = []
+    before_flags: Dict[str, pd.DataFrame] = {}
+    for policy, evidence, columns in policies:
+        flags, _, _, _ = anomaly_flags(df, columns, config, proposed=True)
+        before_flags[policy] = flags
+        n_flagged = int(flags["ensemble_flag"].sum()) if not flags.empty and "ensemble_flag" in flags else 0
+        burden_rows.append({
+            "policy": policy, "role_evidence": evidence,
+            "n_columns": len(columns), "columns": ",".join(columns),
+            "flagged_rows": n_flagged, "flagged_rate": safe_div(n_flagged, len(df)),
+            **fixed,
+        })
+    burden = pd.DataFrame(burden_rows)
+
+    metric_rows: List[Dict[str, Any]] = []
+    rates = config.get("baseline_experiment", {}).get("controlled_error_injection", {}).get("rates", [0.05])
+    for rate in rates:
+        corrupted, truth = inject_controlled_errors(df, metadata, config, rate)
+        for policy, evidence, columns in policies:
+            after, _, _, _ = anomaly_flags(corrupted, columns, config, proposed=True)
+            before = before_flags[policy]
+            if before.empty or after.empty or "ensemble_flag" not in before or "ensemble_flag" not in after:
+                pred = pd.Series(False, index=df.index)
+                before_count = 0
+            else:
+                pred = after["ensemble_flag"] & (~before["ensemble_flag"])
+                before_count = int(before["ensemble_flag"].sum())
+            precision, recall, f1, _ = precision_recall_fscore_support(
+                truth.astype(int), pred.astype(int), average="binary", zero_division=0)
+            metric_rows.append({
+                "policy": policy, "role_evidence": evidence, "injection_rate": rate,
+                "n_columns": len(columns), "injected_error_rows": int(truth.sum()),
+                "newly_flagged_rows": int(pred.sum()), "pre_existing_flagged_rows": before_count,
+                "precision": float(precision), "recall": float(recall), "f1": float(f1),
+                **fixed,
+            })
+    metrics = pd.DataFrame(metric_rows)
+
+    contrasts: List[Dict[str, Any]] = []
+    by_policy = burden.set_index("policy")
+    for name, reference, comparison, isolated in [
+        ("uniform_to_rule", "uniform_dtype_routing", "rule_based_semantic_routing", False),
+        ("rule_to_transformer", "rule_based_semantic_routing", "transformer_augmented_routing", True),
+        ("uniform_to_transformer", "uniform_dtype_routing", "transformer_augmented_routing", False),
+    ]:
+        ref, comp = by_policy.loc[reference], by_policy.loc[comparison]
+        contrasts.append({
+            "contrast": name, "reference_policy": reference, "comparison_policy": comparison,
+            "isolates_transformer_routing_effect": isolated,
+            "column_count_delta": int(comp["n_columns"] - ref["n_columns"]),
+            "flagged_rows_delta": int(comp["flagged_rows"] - ref["flagged_rows"]),
+            "flagged_rate_delta": float(comp["flagged_rate"] - ref["flagged_rate"]),
+            "parameter_lock": fixed["parameter_lock"],
+        })
+    return burden, metrics, pd.DataFrame(contrasts)
+
+
 # -----------------------------------------------------------------------------
 # RQ2 consolidated comparison
 # -----------------------------------------------------------------------------
@@ -1919,6 +2022,8 @@ def evaluate_dataset(dataset_path: Path, metadata_dir: Path, output_dir: Path, c
     inconsistency_issues = pd.concat([rule_inconsistency_issues, cat_inconsistency_issues], ignore_index=True)
     anomaly_comparison, generic_flags, proposed_flags, _, A_anomaly, imputation_report = \
         anomaly_baseline_comparison(df, semantic_profile, uniform_profile, config)
+    ablation_burden, ablation_metrics, ablation_contrasts = \
+        routing_ablation(df, semantic_profile, uniform_profile, metadata, config)
     schema_confidence = float(semantic_profile["role_confidence"].mean()) if not semantic_profile.empty else 1.0
     A, A_components = calculate_A(A_structural, A_domain, A_anomaly, A_inconsistency, schema_confidence, config)
 
@@ -1966,6 +2071,8 @@ def evaluate_dataset(dataset_path: Path, metadata_dir: Path, output_dir: Path, c
         "composite_meets_threshold": bool(composite >= th.get("composite", 0.85)),
         "n_triage_candidates": int(len(triage_register)),
         "semantic_inference_method": ("embedding:" + str(_EMBED_STATE.get("name"))
+                                      + ("@" + str(_EMBED_STATE.get("revision"))
+                                         if _EMBED_STATE.get("revision") else "")
                                       if _EMBED_STATE.get("model") is not None else "lexical_distributional_heuristic"),
     }
     quality_profile_df = pd.DataFrame([quality_profile])
@@ -1999,6 +2106,9 @@ def evaluate_dataset(dataset_path: Path, metadata_dir: Path, output_dir: Path, c
     write_csv(out / "hitl_triage_summary.csv", triage_stats)
     write_csv(out / "hitl_validation_sample.csv", hitl_sample)
     write_csv(out / "controlled_error_baseline.csv", controlled_baseline)
+    write_csv(out / "routing_ablation.csv", ablation_burden)
+    write_csv(out / "routing_ablation_controlled_errors.csv", ablation_metrics)
+    write_csv(out / "routing_ablation_contrasts.csv", ablation_contrasts)
     write_csv(out / "weight_sensitivity.csv", sensitivity)
     write_csv(out / "rq3_quality_profile.csv", quality_profile_df)
     (out / "rq3_quality_profile.json").write_text(json.dumps(quality_profile, indent=2, default=str), encoding="utf-8")
